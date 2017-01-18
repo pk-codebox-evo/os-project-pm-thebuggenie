@@ -34,6 +34,7 @@ class Context
     protected static $_debug_mode = true;
     protected static $debug_id = null;
     protected static $_configuration = null;
+    protected static $_session_initialization_time = null;
     protected static $_partials_visited = array();
 
     /**
@@ -395,6 +396,11 @@ class Context
         return round((($endtime[1] + $endtime[0]) - self::$_loadstart), $precision);
     }
 
+    public static function getSessionLoadTime()
+    {
+        return self::$_session_initialization_time;
+    }
+
     public static function checkInstallMode()
     {
         if (!is_readable(THEBUGGENIE_PATH . 'installed'))
@@ -438,8 +444,16 @@ class Context
     public static function initializeSession()
     {
         Logging::log('Initializing session');
+
+        $starttime = explode(' ', microtime());
+        $before = $starttime[1] + $starttime[0];
         session_name(THEBUGGENIE_SESSION_NAME);
         session_start();
+
+        $endtime = explode(' ', microtime());
+        $after = $endtime[1] + $endtime[0];
+        self::$_session_initialization_time = round(($after - $before), 5);
+
         Logging::log('done (initializing session)');
     }
 
@@ -452,6 +466,8 @@ class Context
     {
         try
         {
+            self::$debug_id = uniqid();
+
             // The time the script was loaded
             $starttime = explode(' ', microtime());
             define('NOW', (integer) $starttime[1]);
@@ -464,7 +480,9 @@ class Context
             // Set the start time
             self::setLoadStart($starttime[1] + $starttime[0]);
 
-            self::checkInstallMode();
+            if (!defined('TBG_CLI')) {
+                self::checkInstallMode();
+            }
             self::getCache()->setPrefix(str_replace('.', '_', Settings::getVersion()));
 
             if (!self::isReadySetup())
@@ -485,8 +503,6 @@ class Context
             }
 
             self::loadConfiguration();
-
-            self::$debug_id = uniqid();
 
             Logging::log('Initializing Caspar framework');
             Logging::log('PHP_SAPI says "' . PHP_SAPI . '"');
@@ -763,7 +779,7 @@ class Context
 
         self::$_debug_mode = self::$_configuration['core']['debug'];
         
-        $log_file = self::$_configuration['core']['log_file'];
+        $log_file = (isset(self::$_configuration['core']['log_file'])) ? self::$_configuration['core']['log_file'] : null;
         if($log_file)
         {
             Logging::setLogFilePath($log_file);
@@ -1723,6 +1739,7 @@ class Context
             self::$_available_permissions['build']['canseebuild'] = array('description' => $i18n->__('Can see this release'));
             self::$_available_permissions['milestone']['canseemilestone'] = array('description' => $i18n->__('Can see this milestone'));
             self::$_available_permissions['issues']['canvoteforissues'] = array('description' => $i18n->__('Can vote for issues'));
+            self::$_available_permissions['issues']['canseetimespent'] = array('description' => $i18n->__('Can see Time Spent'));
             self::$_available_permissions['issues']['canlockandeditlockedissues'] = array('description' => $i18n->__('Can change issue access policy'));
             self::$_available_permissions['issues']['cancreateandeditissues'] = array('description' => $i18n->__('Can create issues, edit basic information on issues reported by the user and close/re-open them'), 'details' => array());
             self::$_available_permissions['issues']['cancreateandeditissues']['details']['cancreateissues'] = array('description' => $i18n->__('Can create new issues'), 'details' => array());
@@ -2272,6 +2289,9 @@ class Context
             if (file_exists($themepath . 'css' . DS . "{$module_name}.css")) {
                 self::getResponse()->addStylesheet(self::getRouting()->generate('asset_css', array('theme_name' => $theme, 'css' => "{$module_name}.css")));
             }
+            if (file_exists($themepath . 'js' . DS . "theme.js")) {
+                self::getResponse()->addJavascript(self::getRouting()->generate('asset_js', array('theme_name' => $theme, 'js' => "theme.js"), false));
+            }
             if (file_exists($basepath . 'js' . DS . "{$module_name}.js")) {
                 self::getResponse()->addJavascript(self::getRouting()->generate('asset_js_unthemed', array('js' => "{$module_name}.js")));
             }
@@ -2369,12 +2389,16 @@ class Context
                         $action_pretime = $time[1] + $time[0];
                     }
                     $action_retval = $action->$actionToRunName(self::getRequest());
-                    session_write_close();
+
                     if (self::$_debug_mode)
                     {
                         $time = explode(' ', microtime());
                         $action_posttime = $time[1] + $time[0];
                         self::visitPartial("{$actionClassName}::{$actionToRunName}()", $action_posttime - $action_pretime);
+                    }
+                    else
+                    {
+                        //session_write_close();
                     }
                 }
                 if (self::getResponse()->getHttpStatus() == 200 && $action_retval)
@@ -2613,8 +2637,10 @@ class Context
             }
 
             if (self::performAction($actionObject, $moduleName, $moduleMethod)) {
-                if (self::isDebugMode())
+                if (self::isDebugMode()) {
                     self::generateDebugInfo();
+                }
+
                 if (\b2db\Core::isInitialized())
                 {
                     \b2db\Core::closeDBLink();
@@ -2640,8 +2666,10 @@ class Context
 
         } catch (\thebuggenie\core\framework\exceptions\CSRFFailureException $e) {
             \b2db\Core::closeDBLink();
-            if (self::isDebugMode())
+            if (self::isDebugMode()) {
                 self::generateDebugInfo();
+            }
+
             self::getResponse()->setHttpStatus(301);
             $message = $e->getMessage();
 
@@ -2665,6 +2693,7 @@ class Context
     {
         $tbg_summary = array();
         $load_time = self::getLoadtime();
+        $session_time = self::$_session_initialization_time;
         if (\b2db\Core::isInitialized())
         {
             $tbg_summary['db']['queries'] = \b2db\Core::getSQLHits();
@@ -2674,6 +2703,7 @@ class Context
             $tbg_summary['db']['objectcount'] = \b2db\Core::getObjectPopulationCount();
         }
         $tbg_summary['load_time'] = ($load_time >= 1) ? round($load_time, 2) . 's' : round($load_time * 1000, 1) . 'ms';
+        $tbg_summary['session_initialization_time'] = ($session_time >= 1) ? round($session_time, 2) . 's' : round($session_time * 1000, 1) . 'ms';
         $tbg_summary['scope'] = array();
         $scope = self::getScope();
         $tbg_summary['scope']['id'] = $scope instanceof Scope ? $scope->getID() : 'unknown';
@@ -2683,15 +2713,17 @@ class Context
         $tbg_summary['partials'] = self::getVisitedPartials();
         $tbg_summary['log'] = Logging::getEntries();
         $tbg_summary['routing'] = array('name' => self::getRouting()->getCurrentRouteName(), 'module' => self::getRouting()->getCurrentRouteModule(), 'action' => self::getRouting()->getCurrentRouteAction());
+
         if (isset($_SESSION))
         {
             if (!array_key_exists('___DEBUGINFO___', $_SESSION))
             {
                 $_SESSION['___DEBUGINFO___'] = array();
             }
-            $_SESSION['___DEBUGINFO___'][self::$debug_id] = $tbg_summary;
-            while (count($_SESSION['___DEBUGINFO___']) > 25)
+            $_SESSION['___DEBUGINFO___'][self::getDebugID()] = $tbg_summary;
+            while (count($_SESSION['___DEBUGINFO___']) > 25) {
                 array_shift($_SESSION['___DEBUGINFO___']);
+            }
         }
     }
 

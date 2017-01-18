@@ -749,11 +749,15 @@
                     framework\Context::getCurrentProject()->preloadValues();
                 }
                 tables\IssueCustomFields::getTable()->preloadValuesByIssueIDs($ids);
-                tables\IssueAffectsBuild::getTable()->preloadValuesByIssueIDs($ids);
-                tables\IssueAffectsEdition::getTable()->preloadValuesByIssueIDs($ids);
-                tables\IssueAffectsComponent::getTable()->preloadValuesByIssueIDs($ids);
+                $build_ids = tables\IssueAffectsBuild::getTable()->preloadValuesByIssueIDs($ids);
+                tables\Builds::getTable()->preloadBuilds($build_ids);
+                $edition_ids = tables\IssueAffectsEdition::getTable()->preloadValuesByIssueIDs($ids);
+                tables\Editions::getTable()->preloadEditions($edition_ids);
+                $component_ids = tables\IssueAffectsComponent::getTable()->preloadValuesByIssueIDs($ids);
+                tables\Components::getTable()->preloadComponents($component_ids);
                 tables\Comments::getTable()->preloadIssueCommentCounts($ids);
                 tables\IssueFiles::getTable()->preloadIssueFileCounts($ids);
+                tables\IssueRelations::getTable()->preloadIssueRelations($ids);
                 $user_ids = array();
                 foreach ($rows as $key => $row)
                 {
@@ -2330,31 +2334,9 @@
         {
             if ($this->_parent_issues === null || $this->_child_issues === null)
             {
-                $this->_parent_issues = array();
-                $this->_child_issues = array();
-
-                if ($res = tables\IssueRelations::getTable()->getRelatedIssues($this->getID()))
-                {
-                    while ($row = $res->getNextRow())
-                    {
-                        try
-                        {
-                            if ($row->get(tables\IssueRelations::PARENT_ID) == $this->getID())
-                            {
-                                $issue = new Issue($row->get(tables\IssueRelations::CHILD_ID));
-                                $this->_child_issues[$row->get(tables\IssueRelations::ID)] = $issue;
-                            }
-                            else
-                            {
-                                $issue = new Issue($row->get(tables\IssueRelations::PARENT_ID));
-                                $this->_parent_issues[$row->get(tables\IssueRelations::ID)] = $issue;
-                            }
-                        }
-                        catch (\Exception $e)
-                        {
-                        }
-                    }
-                }
+                $related_issues = tables\IssueRelations::getTable()->getRelatedIssues($this->getID());
+                $this->_parent_issues = $related_issues['parents'];
+                $this->_child_issues = $related_issues['children'];
             }
         }
 
@@ -4885,7 +4867,7 @@
          */
         public function isSpentTimeVisible()
         {
-            return (bool) ($this->isFieldVisible('spent_time') || $this->hasSpentTime());
+            return (bool) ($this->getProject()->canSeeTimeSpent() && ($this->isFieldVisible('spent_time') || $this->hasSpentTime()));
         }
 
         /**
@@ -5498,7 +5480,7 @@
 
             if ($user->getNotificationSetting(framework\Settings::SETTINGS_USER_NOTIFY_ITEM_ONCE . '_issue_' . $this->getID(), false)->isOff())
             {
-                $user->setNotificationSetting(framework\Settings::SETTINGS_USER_NOTIFY_ITEM_ONCE . '_issue_' . $this->getID(), true)->save();
+                $user->setNotificationSetting(framework\Settings::SETTINGS_USER_NOTIFY_ITEM_ONCE . '_issue_' . $this->getID(), true);
 
                 return true;
             }
@@ -5641,6 +5623,8 @@
                         $item->setComment($comment);
                         $item->save();
                     }
+                    $comment->setHasAssociatedChanges(true);
+                    $comment->save();
                 }
             }
             framework\Event::createNew('core', 'thebuggenie\core\entities\Issue::save_pre_notifications', $this)->trigger();

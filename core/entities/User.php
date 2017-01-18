@@ -334,9 +334,7 @@
          * @var array|\thebuggenie\core\entities\NotificationSetting
          * @Relates(class="\thebuggenie\core\entities\NotificationSetting", collection=true, foreign_column="user_id")
          */
-        protected $_notification_settings = null;
-
-        protected $_notification_settings_sorted = null;
+        protected $_notification_settings = [];
 
         /**
          * List of user's notifications
@@ -367,6 +365,8 @@
         protected $_read_notifications_count = null;
 
         protected $_filter_first_notification = null;
+
+        protected $_permissions_cache = [];
 
         /**
          * Retrieve a user by username
@@ -1266,6 +1266,7 @@
                         $this->removeFriend($friend);
                     }
                 }
+
                 $this->_friends = $friends;
             }
         }
@@ -1302,26 +1303,8 @@
         public function getFriends()
         {
             $this->_setupFriends();
-            $friends = $this->_friends;
 
-            if (framework\Context::isProjectContext())
-            {
-                $project_assigned_users = framework\Context::getCurrentProject()->getAssignedUsers();
-                $project_assigned_teams = framework\Context::getCurrentProject()->getAssignedTeams();
-                $project_assigned_teams_members = array();
-
-                foreach ($project_assigned_teams as $team)
-                {
-                    $project_assigned_teams_members = array_merge($project_assigned_teams_members, $team->getMembers());
-                }
-
-                foreach ($friends as $friend_id => $friend)
-                {
-                    if (! array_key_exists($friend_id, $project_assigned_users) && ! array_key_exists($friend_id, $project_assigned_teams_members)) unset($friends[$friend_id]);
-                }
-            }
-
-            return $friends;
+            return $this->_friends;
         }
 
         /**
@@ -1994,6 +1977,17 @@
             else framework\Settings::deleteSetting(framework\Settings::SETTING_USER_DESKTOP_NOTIFICATIONS_NEW_TAB, 'core', null, $this->getID());
         }
 
+        public function setCommentSortOrder($value)
+        {
+            framework\Settings::saveSetting(framework\Settings::SETTING_USER_COMMENT_ORDER, $value, 'core', null, $this->getID());
+        }
+
+        public function getCommentSortOrder()
+        {
+            $val = framework\Settings::get(framework\Settings::SETTING_USER_COMMENT_ORDER, 'core', framework\Context::getScope(), $this->getID());
+            return ($val !== null) ? $val : 'desc';
+        }
+
         public function getActivationKey()
         {
             return $this->_getOrGenerateActivationKey();
@@ -2132,14 +2126,24 @@
          */
         public function hasPermission($permission_type, $target_id = 0, $module_name = 'core', $check_global_role = true)
         {
-            framework\Logging::log('Checking permission '.$permission_type);
+            framework\Logging::log('Checking permission '.$permission_type.', target id'.$target_id);
+
+            if (array_key_exists($permission_type . '_' . $target_id, $this->_permissions_cache)) {
+                framework\Logging::log('Returning cached permission');
+                return $this->_permissions_cache[$permission_type . '_' . $target_id];
+            }
+
             $group_id = (int) $this->getGroupID();
             $has_associated_project = is_bool($check_global_role) ? $check_global_role : (is_numeric($target_id) && $target_id != 0 ? array_key_exists($target_id, $this->getAssociatedProjects()) : true);
             $teams = $this->getTeams();
 
-            if ($target_id != 0 && Project::getB2DBTable()->selectById($target_id) instanceof \thebuggenie\core\entities\Project)
+            if ($target_id != 0 && $permission_type == 'cancreateissues')
             {
-                $teams = array_intersect_key($teams, Project::getB2DBTable()->selectById($target_id)->getAssignedTeams());
+                $project = Project::getB2DBTable()->selectById($target_id);
+                if ($project instanceof \thebuggenie\core\entities\Project)
+                {
+                    $teams = array_intersect_key($teams, $project->getAssignedTeams());
+                }
             }
             $retval = framework\Context::checkPermission($permission_type, $this->getID(), $group_id, $teams, $target_id, $module_name, $has_associated_project);
             if ($retval !== null)
@@ -2150,6 +2154,8 @@
             {
                 framework\Logging::log('...done (Checking permissions '.$permission_type.', target id '.$target_id.') - return was null');
             }
+
+            $this->_permissions_cache[$permission_type . '_' . $target_id] = $retval;
 
             return $retval;
         }
@@ -2997,28 +3003,27 @@
          */
         public function getNotificationSetting($setting, $default_value = null, $module = 'core')
         {
-            if ($this->_notification_settings === null)
+            if (!array_key_exists($module, $this->_notification_settings))
             {
-                $this->_b2dbLazyload('_notification_settings');
-                $this->_notification_settings_sorted = array();
-                foreach ($this->_notification_settings as $ns)
-                {
-                    if (!array_key_exists($ns->getModuleName(), $this->_notification_settings_sorted)) $this->_notification_settings_sorted[$ns->getModuleName()] = [];
-                    $this->_notification_settings_sorted[$ns->getModuleName()][$ns->getName()] = $ns;
-                }
+                $this->_notification_settings[$module] = [];
             }
-            if (!array_key_exists($module, $this->_notification_settings_sorted)) $this->_notification_settings_sorted[$module] = [];
 
-            if (!isset($this->_notification_settings_sorted[$module][$setting]))
+            if (!array_key_exists($setting, $this->_notification_settings[$module]))
             {
-                $notificationsetting = new \thebuggenie\core\entities\NotificationSetting();
-                $notificationsetting->setUser($this);
-                $notificationsetting->setName($setting);
-                $notificationsetting->setModuleName($module);
-                $notificationsetting->setValue($default_value);
-                $this->_notification_settings_sorted[$module][$setting] = $notificationsetting;
+                $notificationsetting = NotificationSetting::getB2DBTable()->getByModuleAndNameAndUserId($module, $setting, $this->getID());
+                if (!$notificationsetting instanceof NotificationSetting)
+                {
+                    $notificationsetting = new \thebuggenie\core\entities\NotificationSetting();
+                    $notificationsetting->setUser($this);
+                    $notificationsetting->setName($setting);
+                    $notificationsetting->setModuleName($module);
+                    $notificationsetting->setValue($default_value);
+                }
+
+                $this->_notification_settings[$module][$setting] = $notificationsetting;
             }
-            return $this->_notification_settings_sorted[$module][$setting];
+
+            return $this->_notification_settings[$module][$setting];
         }
 
         /**
@@ -3034,6 +3039,7 @@
         {
             $setting_object = $this->getNotificationSetting($setting, null, $module);
             $setting_object->setValue($value);
+            $setting_object->save();
             return $setting_object;
         }
 
